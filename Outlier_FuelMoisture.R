@@ -25,9 +25,13 @@ unitID <- unitID[,-3]
 unitID <- unitID[,-1]
 fuel <- merge(fuel , unitID , by = "unitSamplingEpisodeID")
 
+##Add net weights
+fuel$NetWet <- fuel$grossWetWt_g - fuel$wetContWt_g
+fuel$NetDry <- fuel$grossDryWt_g - fuel$dryContWt_g
+fuel$MoistureWt <- fuel$NetWet - fuel$NetDry
 
 ###Logical Boundaries
-OutL1 <- fuel[fuel$grossWetWt_g - fuel$wetContWt_g < fuel$grossDryWt_g - fuel$dryContWt_g,]
+OutL1 <- fuel[fuel$NetWet < fuel$NetDry,]
 OutL1 <- OutL1[!is.na(OutL1$fuelMoistureID),]
 OutL2 <- fuel[fuel$grossWetWt_g < fuel$wetContWt_g,]
 OutL2 <- OutL2[!is.na(OutL2$fuelMoistureID),]
@@ -42,3 +46,46 @@ if(nrow(OutL3) > 0) {OutL3$Error <- "Logical Bound (WetContWt > GrossWetWet)"; O
 
 
 
+###Regression
+##Net Dry ~ New Wet
+fuelNA <- fuel[!is.na(fuel$MoistureWt),]
+
+mod1 <- lm(fuelNA$NetDry ~fuelNA$NetWet)
+res1 <- rstandard(mod1)
+OutR1 <-fuelNA
+OutR1 <- OutR1[abs(res1) > 3, ]
+res2 <- res1[abs(res1) > 3]
+
+plot(fuelNA$NetWet, fuelNA$NetDry, xlab = "Net wet wt (g)", ylab = "Net dry wt (g)", main = "Net wet wt vs. Net dry wt")
+abline(mod1)
+r2 = summary(mod1)$adj.r.squared
+p = summary(mod1)$coefficients[2,4]
+rp = vector('expression', 2)
+rp[1] = substitute(expression(italic(R)^2 == MYVALUE), list(MYVALUE = format(r2, dig = 3)))[2]
+rp[2] = substitute(expression(italic(p) == MYOTHERVALUE), list(MYOTHERVALUE = format(p, digits = 3))) [2]
+legend('bottomright', legend = rp, bty = 0)
+
+#Outliers with Standardized Residuals > |3|
+plot(fuelNA$NetWet, res1, xlab = "Wet wt (g)", ylab = "Standardized Residuals", main = "Outliers with Standardized Residuals > |3|")
+abline(3, 0)
+abline(-3, 0)
+points(OutR1$NetWet, res2, pch = 21, col = "red", bg = "red")
+
+##  Add Error Message and Output to OutReg
+if(nrow(OutR1) > 0) {OutR1$Error <- "Regression: NetDry~NetWet (StdRes > |3|)"; OutReg <- rbind(OutR1)}
+
+
+
+
+
+###Compile and Export All Outliers to Overstory_Outliers.xls
+if(nrow(OutLog) > 0) {FuelMoisture_Outliers <- rbind(OutLog)}
+if(nrow(OutReg) > 0) {FuelMoisture_Outliers <- rbind(FuelMoisture_Outliers, OutReg)}
+#Date and time stamp on output file
+dt <- Sys.Date()
+tm <- format(Sys.time(), format = "%H.%M.%S", 
+             tz = "", usetz = FALSE)
+
+if(nrow(FuelMoisture_Outliers) > 0) {write.csv(FuelMoisture_Outliers, file = paste(dt, "_", tm, "_", username, 
+                                                                             "_FuelMoisture_Outliers.csv", 
+                                                                             sep = ""))}
