@@ -9,6 +9,7 @@ dir <- paste("C:/Users/", username, "/Documents/GitHub/Quality-Control---Fuel-Mo
 setwd(dir)
 
 ##  Load Packages
+library(dplyr)
 
 ##  Load Data
 fuel = data.frame(read.csv("tbl_fuelMoisture.csv"))
@@ -25,10 +26,23 @@ unitID <- unitID[,-3]
 unitID <- unitID[,-1]
 fuel <- merge(fuel , unitID , by = "unitSamplingEpisodeID")
 
-##Add net weights
+##Add net weights and fuel moisture content
 fuel$NetWet <- fuel$grossWetWt_g - fuel$wetContWt_g
 fuel$NetDry <- fuel$grossDryWt_g - fuel$dryContWt_g
 fuel$MoistureWt <- fuel$NetWet - fuel$NetDry
+fuel$FMpercent <- (fuel$MoistureWt / fuel$NetDry) * 100
+
+###Boxplots
+types <- as.data.frame(table(fuel$sampleMaterialID))
+colnames(types) <-c("sampleMaterialID", "Freq")
+boxplot(FMpercent ~ sampleMaterialID, data = fuel, xlab = "sampleMaterialID", ylab = "Fuel moisture (%)", main = "Fuel moisture percent by sample type", plot = FALSE)
+
+###Fuel Moisture by catagory
+mean.byID <- summarize(group_by(fuel, sampleMaterialID), median(FMpercent, na.rm = TRUE))
+counts <- as.data.frame(table(fuel$sampleMaterialID))
+
+FM.byID <- cbind(counts, mean.byID[,2])
+colnames(FM.byID) <- c("sampleMaterialID", "n", "Mean fuel moisture (%)")
 
 ###Logical Boundaries
 OutL1 <- fuel[fuel$NetWet < fuel$NetDry,]
@@ -37,13 +51,15 @@ OutL2 <- fuel[fuel$grossWetWt_g < fuel$wetContWt_g,]
 OutL2 <- OutL2[!is.na(OutL2$fuelMoistureID),]
 OutL3 <- fuel[fuel$grossDryWt_g < fuel$dryContWt_g,]
 OutL3 <- OutL3[!is.na(OutL3$fuelMoistureID),]
+OutL4 <- fuel[fuel$FMpercent < 0,]
+OutL4 <- OutL4[!is.na(OutL4$FMpercent),]
 
 
 ##  Add Error Message and Output to OutLog
 if(nrow(OutL1) > 0) {OutL1$Error <- "Logical Bound (NetDryWt > NetWetWt)"; OutLog <- rbind(OutL1)}
 if(nrow(OutL2) > 0) {OutL2$Error <- "Logical Bound (DryContWt > GrossDryWt)"; OutLog <- rbind(OutLog, OutL2)}
 if(nrow(OutL3) > 0) {OutL3$Error <- "Logical Bound (WetContWt > GrossWetWet)"; OutLog <- rbind(OutLog, OutL3)}
-
+if(nrow(OutL4) > 0) {OutL4$Error <- "Logical Bound (FuelMoisture < 0)"; OutLog <- rbind(OutLog, OutL4)}
 
 
 ###Regression
@@ -71,6 +87,9 @@ abline(3, 0)
 abline(-3, 0)
 points(OutR1$NetWet, res2, pch = 21, col = "red", bg = "red")
 
+##Regression
+mod1 <- lm(fuelNA$NetDry ~fuelNA$NetWet, subset = )
+
 ##  Add Error Message and Output to OutReg
 if(nrow(OutR1) > 0) {OutR1$Error <- "Regression: NetDry~NetWet (StdRes > |3|)"; OutReg <- rbind(OutR1)}
 
@@ -79,8 +98,11 @@ if(nrow(OutR1) > 0) {OutR1$Error <- "Regression: NetDry~NetWet (StdRes > |3|)"; 
 
 
 ###Compile and Export All Outliers to Overstory_Outliers.xls
+FuelMoisture_Outliers <- data.frame()
 if(nrow(OutLog) > 0) {FuelMoisture_Outliers <- rbind(OutLog)}
 if(nrow(OutReg) > 0) {FuelMoisture_Outliers <- rbind(FuelMoisture_Outliers, OutReg)}
+
+
 #Date and time stamp on output file
 dt <- Sys.Date()
 tm <- format(Sys.time(), format = "%H.%M.%S", 
