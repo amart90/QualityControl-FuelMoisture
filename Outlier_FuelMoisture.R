@@ -10,9 +10,12 @@ setwd(dir)
 
 ##  Load Packages
 library(dplyr)
+library(HH)
+library(xlsx)
 
 ##  Load Data
 fuel = data.frame(read.csv("tbl_fuelMoisture.csv"))
+fuel$sampleMaterialID <- as.factor(fuel$sampleMaterialID)
 sample_units = data.frame(read.csv("tbl_unit.csv"))
 sample_episodes = data.frame(read.csv("tbl_unitSamplingEpisode.csv"))
 
@@ -35,16 +38,18 @@ fuel$FMpercent <- (fuel$MoistureWt / fuel$NetDry) * 100
 ###Boxplots
 types <- as.data.frame(table(fuel$sampleMaterialID))
 colnames(types) <-c("sampleMaterialID", "Freq")
-boxplot(FMpercent ~ sampleMaterialID, data = fuel, xlab = "sampleMaterialID", ylab = "Fuel moisture (%)", main = "Fuel moisture percent by sample type", plot = FALSE)
+boxplot(FMpercent ~ sampleMaterialID, data = fuel, xlab = "sampleMaterialID", ylab = "Fuel moisture (%)", main = "Fuel moisture percent by sample type", plot = T)
 
 ###Fuel Moisture by catagory
-mean.byID <- summarize(group_by(fuel, sampleMaterialID), median(FMpercent, na.rm = TRUE))
+mean.byID <- summarize(group_by(fuel, sampleMaterialID), mean(FMpercent, na.rm = TRUE))
 counts <- as.data.frame(table(fuel$sampleMaterialID))
+sd.byID <- summarize(group_by(fuel, sampleMaterialID), sd(FMpercent, na.rm = TRUE))
+se.byID <- sd.byID$`sd(FMpercent, na.rm = TRUE)` / sqrt(counts$Freq)
+FM.byID <- cbind(counts, mean.byID[,2], se.byID)
+colnames(FM.byID) <- c("sampleMaterialID", "n", "Mean fuel moisture (%)", "SE")
+FM.byID <- FM.byID[!is.na(FM.byID$`Mean fuel moisture (%)`),]
 
-FM.byID <- cbind(counts, mean.byID[,2])
-colnames(FM.byID) <- c("sampleMaterialID", "n", "Mean fuel moisture (%)")
-
-###Logical Boundaries
+###  Logical Boundaries  ###
 OutL1 <- fuel[fuel$NetWet < fuel$NetDry,]
 OutL1 <- OutL1[!is.na(OutL1$fuelMoistureID),]
 OutL2 <- fuel[fuel$grossWetWt_g < fuel$wetContWt_g,]
@@ -62,16 +67,12 @@ if(nrow(OutL3) > 0) {OutL3$Error <- "Logical Bound (WetContWt > GrossWetWet)"; O
 if(nrow(OutL4) > 0) {OutL4$Error <- "Logical Bound (FuelMoisture < 0)"; OutLog <- rbind(OutLog, OutL4)}
 
 
-###Regression
+###  Regression  ###
 ##Net Dry ~ New Wet
 fuelNA <- fuel[!is.na(fuel$MoistureWt),]
-
 mod1 <- lm(fuelNA$NetDry ~fuelNA$NetWet)
-res1 <- rstandard(mod1)
-OutR1 <-fuelNA
-OutR1 <- OutR1[abs(res1) > 3, ]
-res2 <- res1[abs(res1) > 3]
 
+#plot linear model for overall dataset
 plot(fuelNA$NetWet, fuelNA$NetDry, xlab = "Net wet wt (g)", ylab = "Net dry wt (g)", main = "Net wet wt vs. Net dry wt")
 abline(mod1)
 r2 = summary(mod1)$adj.r.squared
@@ -81,33 +82,97 @@ rp[1] = substitute(expression(italic(R)^2 == MYVALUE), list(MYVALUE = format(r2,
 rp[2] = substitute(expression(italic(p) == MYOTHERVALUE), list(MYOTHERVALUE = format(p, digits = 3))) [2]
 legend('bottomright', legend = rp, bty = 0)
 
-#Outliers with Standardized Residuals > |3|
-plot(fuelNA$NetWet, res1, xlab = "Wet wt (g)", ylab = "Standardized Residuals", main = "Outliers with Standardized Residuals > |3|")
-abline(3, 0)
-abline(-3, 0)
-points(OutR1$NetWet, res2, pch = 21, col = "red", bg = "red")
+#residual analysis for overall model
+plot(mod1$fit, mod1$resid, xlab = "x", ylab = "Residuals", main = "Residual Plot") #heteroscedastic
+abline(h=0)
+plot(fuelNA$NetDry, rstudent(mod1), xlab="Fitted Values", ylab="Studentized residuals", 
+     main = "Linear Model Studentized residuals", ylim= c(-3,3))
+abline(h=c(0,2,-2), lty=c(1,2,2))
 
-##Regression
-mod1 <- lm(fuelNA$NetDry ~fuelNA$NetWet, subset = )
+#leverage points for overall model
+hh <- as.data.frame(case(mod1))
+points(fuelNA$NetDry[hh$dffits > 2*sqrt(sum(hh$h)/length(fuelNA$NetWet))], rstudent(mod1)[hh$dffits > 2*sqrt(sum(hh$h)/length(fuelNA$NetWet))], pch = 16, col = "blue")
 
-##  Add Error Message and Output to OutReg
-if(nrow(OutR1) > 0) {OutR1$Error <- "Regression: NetDry~NetWet (StdRes > |3|)"; OutReg <- rbind(OutR1)}
+#Compile outliers for overall model
+OutRo1 <- fuelNA[abs(rstudent(mod1)) > 3, ]
+OutRo1 <- OutRo1[!is.na(OutRo1$fuelMoistureID),]
 
+#Compile leverage points for overall model
+OutRl1 <- fuelNA[hh$dffits > 2*sqrt(sum(hh$h)/length(fuelNA$NetWet)),]
+OutRl1 <- OutRl1[!is.na(OutRl1$fuelMoistureID),]
 
+#Add Error Message 
+if(nrow(OutRl1) > 0) {OutRl1$Error <- "Regression: Leverage Point (NetWet ~ NetDry)"}
+if(nrow(OutRo1) > 0) {OutRo1$Error <- "Regression: |Studentized residuals| > 3 (NetWet ~ NetDry)"}
 
+#Compute outliers and leverage points for models 
+#calculated by surface material type (SM)
+SMid <- sort(unique(fuelNA$sampleMaterialID))
+for(i in 1:length(SMid)){
+  #separate data by surface material type
+  assign(paste0("fuel.SM",SMid[i]), fuelNA[fuelNA$sampleMaterialID == SMid[i],])
+  #create linear models for each dataset (NetDry ~ NetWet)
+  assign(paste0("mod.SM",SMid[i]), lm(NetDry ~ NetWet, data = get(paste0("fuel.SM",SMid[i]))))
+  #plot linear models
+  plot(get(paste0("fuel.SM",SMid[i]))$NetWet, get(paste0("fuel.SM",SMid[i]))$NetDry, 
+       main = paste0("mod.SM",SMid[i]), xlab = "Net wet wt (g)", ylab = "Net dry wt (g)")
+  abline(get(paste0("mod.SM",SMid[i])))
+  #add r^2 and p value to plots
+  r2 = summary(get(paste0("mod.SM",SMid[i])))$adj.r.squared
+  p = summary(get(paste0("mod.SM",SMid[i])))$coefficients[2,4]
+  rp = vector('expression', 2)
+  rp[1] = substitute(expression(italic(R)^2 == MYVALUE), list(MYVALUE = format(r2, dig = 3)))[2]
+  rp[2] = substitute(expression(italic(p) == MYOTHERVALUE), list(MYOTHERVALUE = format(p, digits = 3))) [2]
+  legend('bottomright', legend = rp, bty = 0)
+  
+  #compile outliers for regression (by SM type)
+  assign(paste0("OutRo", 1+i), get(paste0("fuel.SM",SMid[i]))[abs(rstudent(get(paste0("mod.SM",SMid[i])))) > 3,])
+  ##add Error text
+  assign("Error", rep("Regression: |Studentized residuals| > 3 (NetWet ~ NetDry: within SM type)",length(get(paste0("OutRo", 1+i))[,1])))
+  assign(paste0("OutRo", 1+i), cbind(get(paste0("OutRo", 1+i)), Error, row.names= NULL))
+  
+  #compile leverage points for regression (by SM type)
+  assign(paste0("hh.SM",SMid[i]), as.data.frame(case(get(paste0("mod.SM",SMid[i])))))
+  assign(paste0("OutRl", 1+i), get(paste0("fuel.SM",SMid[i]))[get(paste0("hh.SM",SMid[i]))$dffits > 2*sqrt(sum(get(paste0("hh.SM",SMid[i]))$h)/length(get(paste0("fuel.SM",SMid[i]))$NetWet)),])
+  ##add Error text
+  assign("Error", rep("Regression: Leverage Point (NetWet ~ NetDry: within SM type)",length(get(paste0("OutRl", 1+i))[,1])))
+  assign(paste0("OutRl", 1+i), cbind(get(paste0("OutRl", 1+i)), Error, row.names= NULL))
+}
 
+#Compile outliers and leverage points
+OutRO <- bind_rows(mget(ls(pattern = "OutRo")))
+OutRL <- bind_rows(mget(ls(pattern = "OutRl")))
+#Remove observations from regression error list that are not leverage points
+OutReg <- OutRO[OutRO$fuelMoistureID %in% OutRL$fuelMoistureID ,]
 
-###Compile and Export All Outliers to Overstory_Outliers.xls
+###Compile and Export All Outliers to FuelMositure_Outliers.xls
 FuelMoisture_Outliers <- data.frame()
 if(nrow(OutLog) > 0) {FuelMoisture_Outliers <- rbind(OutLog)}
 if(nrow(OutReg) > 0) {FuelMoisture_Outliers <- rbind(FuelMoisture_Outliers, OutReg)}
 
+#Produce an error summary
+if(nrow(FuelMoisture_Outliers) > 0) {
+  errorsummary <- as.data.frame(table(FuelMoisture_Outliers$Error))
+  colnames(errorsummary) <- c("Error", "Frequency")
+  errorcount <- matrix(c("Total errors", length(FuelMoisture_Outliers$Error)),nrow=1, ncol=2)
+  obscount <- matrix(c("Total measured observations", (length(fuelNA$fuelMoistureID))),nrow=1, ncol=2)
+  errorrate <- matrix(c("Error rate (errors per observation)", round(as.numeric(errorcount[,2]) / as.numeric(obscount[,2]), 3)) ,nrow=1, ncol=2)
+  b <- matrix(c(rep.int(NA, 2)), nrow=1, ncol=2)
+  FuelMoisturesummary <-data.frame()
+  FuelMoisturesummary1 <- as.data.frame(rbind(b, errorcount, obscount, errorrate))
+  colnames(FuelMoisturesummary1) <- c("Error", "Frequency")
+  FuelMoisturesummary <- rbind(errorsummary, FuelMoisturesummary1)
+  FuelMoisturesummary[,2] <- as.numeric(FuelMoisturesummary[,2])}
 
 #Date and time stamp on output file
 dt <- Sys.Date()
 tm <- format(Sys.time(), format = "%H.%M.%S", 
-             tz = "", usetz = FALSE)
+  tz = "", usetz = FALSE)
 
-if(nrow(FuelMoisture_Outliers) > 0) {write.csv(FuelMoisture_Outliers, file = paste(dt, "_", tm, "_", username, 
-                                                                             "_FuelMoisture_Outliers.csv", 
-                                                                             sep = ""))}
+#Output to Excel file
+if(nrow(FuelMoisture_Outliers) > 0) {
+  write.xlsx(FuelMoisturesummary, file = paste0(dt, "_", tm, "_", username, "_FuelMoisture_Outliers.xlsx"),
+             sheetName = "Summary", row.names = FALSE, col.names = TRUE, showNA = FALSE)
+  write.xlsx(FuelMoisture_Outliers, file = paste0(dt, "_", tm, "_", username, "_FuelMoisture_Outliers.xlsx"),
+             sheetName = "Errors", row.names = FALSE, col.names = TRUE, showNA = FALSE, append = TRUE)}
+
